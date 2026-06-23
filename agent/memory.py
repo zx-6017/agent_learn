@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 import os
+import re
 from typing import Any
 
 
@@ -170,9 +171,15 @@ class MemoryStore:
                         target, conn, "条目已存在（未重复添加）"
                     )
 
+                replace_user_name = target == "user" and self._is_user_name_entry(content)
+                if replace_user_name:
+                    current_total = self._char_count_without_user_name_entries(conn)
+                    new_total = current_total + len(content) + 2
+                else:
+                    current_total = self._char_count(conn, target)
+                    new_total = current_total + len(content) + 2  # +2 预留给分隔符
+
                 # 检查字符上限
-                current_total = self._char_count(conn, target)
-                new_total = current_total + len(content) + 2  # +2 预留给分隔符
                 if new_total > limit:
                     return self._err(
                         f"Memory 已使用 {current_total:,}/{limit:,} 字符。"
@@ -180,12 +187,16 @@ class MemoryStore:
                         f"请先用 replace 合并或 remove 删除旧条目。"
                     )
 
+                if replace_user_name:
+                    self._delete_user_name_entries(conn)
+
                 conn.execute(
                     "INSERT INTO memory_entries (target, content) VALUES (?, ?)",
                     (target, content),
                 )
 
-            return self._ok(target, None, "条目已添加")
+            message = "用户姓名条目已替换" if replace_user_name else "条目已添加"
+            return self._ok(target, None, message)
 
         except sqlite3.Error as e:
             return self._err(f"数据库错误: {e}")
@@ -334,6 +345,36 @@ class MemoryStore:
 
     def _limit_for(self, target: str) -> int:
         return self.memory_limit if target == "memory" else self.user_limit
+
+    @staticmethod
+    def _is_user_name_entry(content: str) -> bool:
+        """识别用户姓名这类唯一画像事实。"""
+        return bool(re.match(r"^用户(?:名|的名字)?(?:叫|是)\s*.+。?$", content.strip()))
+
+    @staticmethod
+    def _delete_user_name_entries(conn):
+        """删除已有用户姓名条目，避免同一唯一事实互相冲突。"""
+        rows = conn.execute(
+            "SELECT content FROM memory_entries WHERE target = 'user'"
+        ).fetchall()
+        for (content,) in rows:
+            if MemoryStore._is_user_name_entry(content):
+                conn.execute(
+                    "DELETE FROM memory_entries WHERE target = 'user' AND content = ?",
+                    (content,),
+                )
+
+    @staticmethod
+    def _char_count_without_user_name_entries(conn) -> int:
+        """统计 user memory 中排除姓名条目后的字符数。"""
+        rows = conn.execute(
+            "SELECT content FROM memory_entries WHERE target = 'user'"
+        ).fetchall()
+        entries = [
+            content for (content,) in rows
+            if not MemoryStore._is_user_name_entry(content)
+        ]
+        return len("\n§\n".join(entries))
 
     @staticmethod
     def _find_by_substring(conn, target: str, text: str) -> list[str]:

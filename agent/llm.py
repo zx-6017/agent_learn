@@ -146,7 +146,8 @@ class LLMClient:
     def _send(self, body: dict[str, Any]) -> dict[str, Any]:
         """发送 HTTP 请求，返回原始 JSON"""
         url = f"{self.base_url}/chat/completions"
-        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        safe_body = self._sanitize_for_json(body)
+        payload = json.dumps(safe_body, ensure_ascii=False).encode("utf-8")
         req = Request(
             url,
             data=payload,
@@ -157,6 +158,20 @@ class LLMClient:
         )
         with urlopen(req, timeout=self.timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
+
+    @staticmethod
+    def _sanitize_for_json(value: Any) -> Any:
+        """Remove invalid Unicode surrogates before UTF-8 JSON encoding."""
+        if isinstance(value, str):
+            return value.encode("utf-8", errors="replace").decode("utf-8")
+        if isinstance(value, list):
+            return [LLMClient._sanitize_for_json(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                LLMClient._sanitize_for_json(k): LLMClient._sanitize_for_json(v)
+                for k, v in value.items()
+            }
+        return value
 
     @staticmethod
     def _read_error_body(e: HTTPError) -> str:

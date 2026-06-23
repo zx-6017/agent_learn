@@ -246,6 +246,9 @@ def _make_memory_func(store: MemoryStore) -> Callable:
         else:
             result = {"ok": False, "message": f"未知 action: {action}，可用: add, replace, remove, read"}
 
+        if result.get("ok") and action in ("add", "replace", "remove"):
+            store.load()
+
         return json.dumps(result, ensure_ascii=False)
 
     return _tool_memory
@@ -280,7 +283,10 @@ MEMORY_SCHEMA_DESCRIPTION = (
     "- add：新增条目\n"
     "- replace：更新已有条目（old_text 是用于匹配的旧文本子串）\n"
     "- remove：删除条目（old_text 是用于匹配的文本子串）\n"
-    "- read：查看当前所有条目"
+    "- read：查看当前所有条目\n"
+    "\n"
+    "重要：如果用户纠正或变更姓名、偏好等已有画像，不要新增冲突条目；"
+    "优先使用 replace 更新旧条目。"
 )
 
 
