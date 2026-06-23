@@ -26,4 +26,4 @@ memory.db
 Thumbs.db
 
 # Config with secrets
-# config.yaml  # 如果包含敏感信息就取消注释
+config.yaml
