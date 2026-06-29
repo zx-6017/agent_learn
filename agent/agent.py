@@ -26,8 +26,8 @@ import json
 import time
 from typing import Any
 
-from .llm import LLMClient
-from .tools import ToolRegistry
+from .llm import LLMClient, LLMResponse, ParsedToolCall
+from .tools import ToolRegistry, ToolResult
 from .memory import MemoryStore
 
 
@@ -97,6 +97,8 @@ SYSTEM_PROMPT = """你是一个 AI 助手，能够使用工具来完成任务。
 - 用户偏好、环境信息、重要教训等值得记住的内容
 - 主动保存，不要等用户要求
 - 不要保存临时的任务进度或琐碎信息
+- 记忆按 scope/topic 分层：user=跨项目用户偏好，project=当前项目，local=本机私有环境
+- pinned=true 的短条目会进入启动索引；长流程和细节用 pinned=false 存到具体 topic，需要时再 search/read
 
 ## 规则
 - 始终用中文回复用户
@@ -168,12 +170,13 @@ class Agent:
             response = self.llm.chat(self.messages, tools=tool_schemas)
 
             # ── 展示 LLM 返回的结构化信息 ──
-            if self.verbose and response.get("usage"):
+            if self.verbose:
                 u = response["usage"]
-                print(Color.dim(
-                    f"  tokens: {u.get('prompt_tokens', '?')}→{u.get('completion_tokens', '?')}  "
-                    f"|  finish: {response.get('finish_reason', '?')}"
-                ))
+                if isinstance(u, dict):
+                    print(Color.dim(
+                        f"  tokens: {u.get('prompt_tokens', '?')}→{u.get('completion_tokens', '?')}  "
+                        + f"|  finish: {response['finish_reason']}"
+                    ))
 
             # ── 分支 1: LLM 返回纯文本 = 最终答案 ──
             if response["content"] and not response["tool_calls"]:
@@ -211,7 +214,7 @@ class Agent:
             "content": "你已经用完了所有步骤。请基于已获得的信息，给出你的最终答案。",
         })
         response = self.llm.chat(self.messages)
-        return response.get("content", "无法完成任务。")
+        return response["content"] or "无法完成任务。"
 
     # ── 内部方法 ──────────────────────────────────────────
 
@@ -241,7 +244,7 @@ class Agent:
             {"role": "user", "content": user_input},
         ]
 
-    def _record_assistant_message(self, response: dict[str, Any]):
+    def _record_assistant_message(self, response: LLMResponse):
         """将 LLM 的 assistant 消息（含 tool_calls）加入对话历史。
 
         这里的 tool_calls 格式是 OpenAI 原生格式:
@@ -280,7 +283,7 @@ class Agent:
             ]
         self.messages.append(assistant_msg)
 
-    def _execute_and_record(self, tool_call: dict[str, Any]):
+    def _execute_and_record(self, tool_call: ParsedToolCall):
         """执行一个工具调用，展示结果，并写入消息历史。
 
         tool_call 结构（来自 llm.py 的 _parse_response）:
@@ -296,7 +299,7 @@ class Agent:
         # ── 查找工具 ──
         tool = self.tools.get(name)
         if tool is None:
-            result = {
+            result: ToolResult = {
                 "ok": False,
                 "output": "",
                 "error": f"未知工具: {name}",
@@ -349,7 +352,7 @@ class Agent:
             print(f"  {content}")
         return content
 
-    def _print_step_header(self):
+    def _print_step_header(self) -> None:
         """打印步骤头"""
         if self.verbose:
             # 带颜色的分隔线
@@ -359,7 +362,7 @@ class Agent:
             print(line)
 
     @staticmethod
-    def _fmt_args(args: dict[str, Any]) -> str:
+    def _fmt_args(args: dict[str, object]) -> str:
         """格式化工具参数用于终端展示。
 
         输出如: filepath='config.yaml', limit=500

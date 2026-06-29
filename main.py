@@ -16,20 +16,40 @@
 
 import sys
 import os
+from typing import TypedDict
+
 import yaml
 
-from agent.llm import LLMClient
+from agent.llm import LLMClient, OpenAIConfig
 from agent.memory import MemoryStore
 from agent.tools import create_default_registry
 from agent.agent import Agent
+
+
+class _AgentConfig(TypedDict):
+    max_steps: int
+    verbose: bool
+    workdir: str
+
+
+class _MemoryConfig(TypedDict, total=False):
+    db_path: str
+    memory_limit: int
+    user_limit: int
+
+
+class _Config(TypedDict):
+    openai: OpenAIConfig
+    agent: _AgentConfig
+    memory: _MemoryConfig
 
 # 配置文件路径 — 和 main.py 同目录
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.yaml")
 
 
-def load_config() -> dict:
+def load_config() -> _Config:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        return yaml.safe_load(stream=f)
 
 
 def list_tools(registry):
@@ -53,18 +73,20 @@ def list_tools(registry):
 
 
 def show_memory(store: MemoryStore):
-    """展示当前 memory 快照"""
+    """展示当前 memory 分层内容。"""
     print("=" * 60)
-    print("  Memory 快照")
+    print("  Memory 分层内容")
     print("=" * 60)
 
     for target in ("user", "memory"):
-        entries = store._snapshot.get(target, [])
+        result = store.read(target=target, limit=200)
+        entries = result.get("entries", []) if result.get("ok") else []
         limit = store.memory_limit if target == "memory" else store.user_limit
-        joined = "\n§\n".join(entries)
+        pinned_entries = [e for e in entries if e.get("pinned")]
+        joined = "\n§\n".join(e["content"] for e in pinned_entries)
         current = len(joined)
 
-        status = f"[{len(entries)} 条, {current:,}/{limit:,} chars]"
+        status = f"[{len(entries)} 条, pinned {len(pinned_entries)} 条, {current:,}/{limit:,} chars]"
         tag = "👤 USER PROFILE" if target == "user" else "🧠 MEMORY"
         print(f"\n{tag} {status}")
 
@@ -73,8 +95,11 @@ def show_memory(store: MemoryStore):
         else:
             for i, entry in enumerate(entries, 1):
                 # 截断显示
-                display = entry[:120] + ("..." if len(entry) > 120 else "")
-                print(f"  {i}. {display}")
+                content = entry["content"]
+                display = content[:120] + ("..." if len(content) > 120 else "")
+                layer = f"{entry['scope']}/{entry['topic']}"
+                pin = "pinned" if entry["pinned"] else "topic"
+                print(f"  {i}. [{layer}/{pin}] {display}")
     print()
 
 

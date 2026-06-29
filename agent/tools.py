@@ -22,10 +22,17 @@ import json
 import datetime
 import subprocess
 import glob as glob_module
-from typing import Any, Callable
+from typing import Any, Callable, TypedDict
 
 # ── Memory 导入（避免循环依赖）─────────
 from .memory import MemoryStore
+
+
+class ToolResult(TypedDict):
+    ok: bool
+    output: str
+    error: str | None
+    meta: dict[str, Any]
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -40,14 +47,14 @@ class Tool:
         name: str,
         description: str,
         parameters: dict[str, Any],
-        func: Callable,
+        func: Callable[..., object],
     ):
         self.name = name
         self.description = description
         self.parameters = parameters
-        self._func = func
+        self._func: Callable[..., object] = func
 
-    def execute(self, **kwargs: Any) -> dict[str, Any]:
+    def execute(self, **kwargs: object) -> ToolResult:
         """执行工具，始终返回统一结构。
 
         Returns:
@@ -218,7 +225,7 @@ def _tool_run_command(command: str, workdir: str | None = None) -> str:
 # Memory 工具（特殊处理：需要 MemoryStore 实例）
 # ═══════════════════════════════════════════════════════════════
 
-def _make_memory_func(store: MemoryStore) -> Callable:
+def _make_memory_func(store: MemoryStore) -> Callable[..., str]:
     """创建绑定了 MemoryStore 实例的 memory 工具函数。
 
     这是 closure 模式：工具执行时能访问实际的 store 实例，
@@ -229,22 +236,56 @@ def _make_memory_func(store: MemoryStore) -> Callable:
         target: str = "memory",
         content: str = "",
         old_text: str = "",
+        scope: str = "",
+        topic: str = "",
+        pinned: bool | None = None,
+        query: str = "",
+        limit: int = 50,
     ) -> str:
         """持久化记忆操作。
 
-        action: "add" | "replace" | "remove" | "read"
+        action: "add" | "replace" | "remove" | "read" | "search"
         target: "memory" (agent 笔记) | "user" (用户画像)
         """
+        effective_target = target or "memory"
+
         if action == "add":
-            result = store.add(target, content)
+            result = store.add(
+                effective_target,
+                content,
+                scope=scope,
+                topic=topic,
+                pinned=True if pinned is None else pinned,
+            )
         elif action == "replace":
-            result = store.replace(target, old_text, content)
+            result = store.replace(
+                effective_target,
+                old_text,
+                content,
+                scope=scope or None,
+                topic=topic or None,
+                pinned=pinned,
+            )
         elif action == "remove":
-            result = store.remove(target, old_text)
+            result = store.remove(effective_target, old_text, scope=scope or None, topic=topic or None)
         elif action == "read":
-            result = store.read(target)
+            result = store.read(
+                effective_target,
+                scope=scope or None,
+                topic=topic or None,
+                pinned=None,
+                limit=limit,
+            )
+        elif action == "search":
+            result = store.search(
+                query,
+                target=target or None,
+                scope=scope or None,
+                topic=topic or None,
+                limit=limit,
+            )
         else:
-            result = {"ok": False, "message": f"未知 action: {action}，可用: add, replace, remove, read"}
+            result = {"ok": False, "message": f"未知 action: {action}，可用: add, replace, remove, read, search"}
 
         if result.get("ok") and action in ("add", "replace", "remove"):
             store.load()
@@ -257,7 +298,7 @@ def _make_memory_func(store: MemoryStore) -> Callable:
 # 发给 LLM 的 memory 工具 schema
 # description 的设计参考 Hermes Agent：详细说明"何时用"比"怎么用"更重要
 MEMORY_SCHEMA_DESCRIPTION = (
-    "保存持久信息到长期记忆，跨会话保留。\n"
+    "保存和检索分层长期记忆，跨会话保留。设计参考 Claude Code：启动 prompt 只放索引，细节按主题读取。\n"
     "\n"
     "何时使用（主动保存，不要等用户要求）：\n"
     '- 用户纠正你，或说"记住这个"、"以后都这样"\n'
@@ -275,18 +316,30 @@ MEMORY_SCHEMA_DESCRIPTION = (
     "- 琐碎/显而易见的事实\n"
     "- 原始数据转储\n"
     "\n"
-    "两个存储目标：\n"
+    "target：\n"
     "- 'memory'：agent 笔记（项目约定、工具技巧、经验教训）\n"
     "- 'user'：用户画像（名字、偏好、沟通风格、忌讳）\n"
     "\n"
+    "scope 分层：\n"
+    "- 'user'：跨项目用户偏好和身份信息\n"
+    "- 'project'：当前项目的约定、架构、命令、踩坑\n"
+    "- 'local'：当前机器/私有环境细节，不应共享到项目规则\n"
+    "\n"
+    "topic：主题名，如 python, testing, project-layout, api-client。"
+    "把细节拆到具体 topic，避免单一 memory 无限膨胀。\n"
+    "\n"
+    "pinned：是否默认注入启动 prompt。只把短小、稳定、会反复用到的索引设为 true；"
+    "长流程、详细经验、命令输出摘要设为 false，并用 read/search 按需取回。\n"
+    "\n"
     "操作：\n"
     "- add：新增条目\n"
-    "- replace：更新已有条目（old_text 是用于匹配的旧文本子串）\n"
-    "- remove：删除条目（old_text 是用于匹配的文本子串）\n"
-    "- read：查看当前所有条目\n"
+    "- replace：更新已有条目（old_text 是用于匹配的旧文本子串，可用 scope/topic 缩小范围）\n"
+    "- remove：删除条目（old_text 是用于匹配的文本子串，可用 scope/topic 缩小范围）\n"
+    "- read：按 target/scope/topic 查看条目\n"
+    "- search：按 query 搜索所有记忆或指定层级\n"
     "\n"
     "重要：如果用户纠正或变更姓名、偏好等已有画像，不要新增冲突条目；"
-    "优先使用 replace 更新旧条目。"
+    "优先 search/read 找旧条目，再用 replace 更新。"
 )
 
 
@@ -445,13 +498,13 @@ def create_default_registry(
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["add", "replace", "remove", "read"],
-                        "description": "操作类型：add(新增), replace(更新), remove(删除), read(查看)",
+                        "enum": ["add", "replace", "remove", "read", "search"],
+                        "description": "操作类型：add(新增), replace(更新), remove(删除), read(按层查看), search(关键词搜索)",
                     },
                     "target": {
                         "type": "string",
-                        "enum": ["memory", "user"],
-                        "description": "存储目标：'memory'（agent 笔记）或 'user'（用户画像）",
+                        "enum": ["", "memory", "user"],
+                        "description": "存储目标：'memory'（agent 笔记）或 'user'（用户画像）。search 时可留空表示搜索全部。",
                     },
                     "content": {
                         "type": "string",
@@ -461,8 +514,29 @@ def create_default_registry(
                         "type": "string",
                         "description": "用于匹配旧条目的文本子串。replace 和 remove 时必需。",
                     },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["", "user", "project", "local"],
+                        "description": "记忆层级：user(跨项目用户偏好), project(当前项目), local(本机私有)。留空时按 target 默认选择。",
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description": "主题名，如 testing、project-layout、api-client。read/search/replace/remove 可用来缩小范围。",
+                    },
+                    "pinned": {
+                        "type": "boolean",
+                        "description": "是否加入启动索引并默认注入 prompt。短小稳定事实用 true；长细节和流程用 false。",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "search 时的关键词，可匹配 topic 或内容。",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "read/search 最多返回的条目数。",
+                    },
                 },
-                "required": ["action", "target"],
+                "required": ["action"],
             },
             func=_make_memory_func(memory_store),
         ))

@@ -25,9 +25,30 @@ from __future__ import annotations
 import os
 import json
 import time
-from typing import Any
+from typing import Any, TypedDict
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+
+
+class OpenAIConfig(TypedDict):
+    api_key: str
+    base_url: str
+    model: str
+    max_retries: int
+    timeout: int
+
+
+class ParsedToolCall(TypedDict):
+    id: str
+    name: str
+    arguments: dict[str, object]
+
+
+class LLMResponse(TypedDict):
+    content: str | None
+    tool_calls: list[ParsedToolCall]
+    finish_reason: str
+    usage: dict[str, object] | None
 
 
 class LLMClient:
@@ -62,7 +83,7 @@ class LLMClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         response_format: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> LLMResponse:
         """发送消息到 LLM，返回统一结构。
 
         Args:
@@ -219,7 +240,7 @@ class LLMClient:
     # ── 工厂方法 ──────────────────────────────────────────
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "LLMClient":
+    def from_config(cls, config: OpenAIConfig) -> "LLMClient":
         """从配置字典创建实例。
 
         支持 ${ENV_VAR} 占位符:
