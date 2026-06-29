@@ -27,3 +27,7 @@ Thumbs.db
 
 # Config with secrets
 config.yaml
+
+# Generated agent rule links
+AGENTS.md
+.cursorrules
